@@ -10,40 +10,50 @@
 #define NUM_LEDS_PER_BULB 4
 #define NUM_BULBS 3
 
-#define BRIGHTNESS 50
+#define BRIGHTNESS 100
 #define FRAMES_PER_SECOND  125 // 125 frames/sec <=> 8 milli/frame
 
 #define HOLD_DELAY 350 // In Milli second
+#define MIN_HSV_VALUE 130
+#define MAX_HSV_VALUE 255
+
+#define MIN_CYCLE_SPEED 1
+#define MAX_CYCLE_SPEED 100
 
 // Define the array of leds
 CRGB leds[NUM_LEDS];
 
 uint8_t gOffset = 0; // Set via the knob (analog value)
-uint8_t gHue = 0; // Animation (always changing)
-uint8_t gBulbsHue[NUM_BULBS];
+
+uint8_t gCycleSpeed = MIN_CYCLE_SPEED;
+
+uint8_t gHsvHue = 0; // Animation (always changing)
+uint8_t gHsvValue = MAX_HSV_VALUE;
+
+uint8_t gBulbHsvHue[NUM_BULBS];
 
 enum patternEnum {
-  SOLID_ONE_MIX_HUE,
-  SOLID_ONE_MIX_BRIGHTNESS,
-  SOLID_THREE_MIX_HUE,
-  SOLID_THREE_MIX_BRIGHTNESS_TRANSITION_SPEED,
-  SOLID_THREE_MIX_HUE_TRANSITION_SPEED,
+  SOLID_ONE_MIX_HSV_HUE,
+  // SOLID_ONE_MIX_HSV_VALUE,
+  SOLID_THREE_RANDOM_HSV_HUE,
+  SOLID_THREE_MIX_HSV_HUE,
+  // SOLID_THREE_MIX_BRIGHTNESS_TRANSITION_SPEED,
+  // SOLID_THREE_MIX_HUE_TRANSITION_SPEED,
   RAINBOW_MIX_SPEED,
   PATTERN_COUNT
 };
-uint8_t gPatternIdx = SOLID_ONE_MIX_HUE;
+uint8_t gPatternIdx = PATTERN_COUNT - 1; // Init to last PatternIdx
 void (*gPattern)();
 
-
 const char *patternName[PATTERN_COUNT] = {
-  "[0] solid 1 : Mix => Hue",
-  "[1] solid 1 : Mix => Brightness",
-  "[2] solid 3 : Mix => Hue",
-  "[3] solid 3 : Mix => Brightness Transition Speed",
-  "[4] solid 3 : Mix => Hue Transition Speed",
+  "[0] solid 1 : Mix => HSV Hue",
+  // "[1] solid 1 : Mix => HSV Value",
+  "[2] solid 3 : Random => HSV Hue",
+  "[3] solid 3 : Mix => HSV Hue",
+  // "[3] solid 3 : Mix => Brightness Transition Speed",
+  // "[4] solid 3 : Mix => Hue Transition Speed",
   "[5] rainbow : MIX => Speed"
 };
-
 
 boolean wasPressed = false;
 boolean prestine = true;
@@ -66,8 +76,10 @@ void setup() {
   updateGpattern();
 
   for (int i = 1; i < NUM_BULBS; i += 1) {
-    gBulbsHue[i] = random(8);
+    gBulbHsvHue[i] = random(8);
   }
+
+  gPattern = solidWhite;
 
   Serial.println(" @@@@@@@@@@@@@@@@@@@ REBOOT @@@@@@@@@@@@@@");
   Serial.println("Setup done");
@@ -117,26 +129,26 @@ void loop() {
     holding = false;
   } else if (!isPressed && !wasPressed) {
     // Serial.println(" <R> Button in RELEASED state");
-    updateGoffset();
   } else {
     Serial.println("ERROR! Impossible state.");
   }
 
   EVERY_N_MILLISECONDS( 1000 / FRAMES_PER_SECOND ) {
     gPattern();
-    //solidOneMixHue();
     FastLED.show();
   }
 
-  EVERY_N_MILLISECONDS( 40 ) {
-    gHue += 1;
-  }
+  /*
+    EVERY_N_MILLISECONDS( 40 ) {
+      gHsvHue += 1;
+    }
+  */
 }
 
 void solidBulb(uint8_t idx, uint8_t hue) {
   uint8_t bulbOffset = (idx * NUM_LEDS_PER_BULB);
   for (uint8_t i = 0; i < NUM_LEDS_PER_BULB; i += 1) {
-    leds[i + bulbOffset] = CHSV(hue, 255, 255);
+    leds[i + bulbOffset] = CHSV(hue, 255, gHsvValue);
   }
 }
 
@@ -145,7 +157,7 @@ boolean updateGpatternIdx() {
 
   uint8_t patternIdx = map(analogValue, 0, 1024, 0, PATTERN_COUNT);
 
-  if (patternIdx != gPatternIdx && analogValue % (1024 / PATTERN_COUNT) > 5 ) {
+  if (patternIdx != gPatternIdx && analogValue % (1024 / PATTERN_COUNT) > 5 ) { // Magic +/- 5 is the deadband to consider a change
     gPatternIdx = patternIdx;
     Serial.println("Changed pattern to:");
     Serial.println(patternName[gPatternIdx]);
@@ -157,51 +169,118 @@ boolean updateGpatternIdx() {
   }
 }
 
-void updateGoffset() {
+// Sync gOffset with our Analog Reading.
+void gOffsetSync() {
   uint8_t offset = map(analogRead(ANALOG_PIN), 0, 1023, 0, 255); // 10 Bits ADC (Int [0 to 1023])
 
   if (gOffset != offset && abs(gOffset - offset) > 3) {
     gOffset = offset;
-    Serial.println("Changed offset to:");
-    Serial.println(offset);
+    Serial.println("Changed gOffset to:");
+    Serial.println(gOffset);
 
   }
 }
 
-void solidOneMixHue() {
-  fill_solid(leds, NUM_LEDS, CHSV(gOffset, 255, 255));
+// Sync gHsvValue with our Analog Reading.
+void gHsvValueSync() {
+  uint8_t hsvValue = map(analogRead(ANALOG_PIN), 0, 1023, MIN_HSV_VALUE, 255); // 10 Bits ADC (Int [0 to 1023])
 
-  if (gBulbsHue[0] != gOffset) {
-    gBulbsHue[0] = gOffset;
-    for (int i = 1; i < NUM_BULBS; i += 1) {
-      Serial.println("Bulb #");
-      Serial.println(i);
-      gBulbsHue[i] = random8();
-      Serial.println(gBulbsHue[i]);
+  // Magic [-3, 3] interval, is the deadband to trigger change detection
+  if (gHsvValue != hsvValue && abs(gHsvValue - hsvValue) > 2) {
+    gHsvValue = hsvValue;
+    Serial.println("Changed gHsvValue to:");
+    Serial.println(gHsvValue);
+  }
+}
+
+void gHsvHueSync() {
+  uint8_t hsvHue = map(analogRead(ANALOG_PIN), 0, 1023, 0, 255); // 10 Bits ADC (Int [0 to 1023])
+
+  // Magic [-3, 3] interval, is the deadband to trigger change detection
+  if (gHsvHue != hsvHue && abs(gHsvHue - hsvHue) > 2) {
+    gHsvHue = hsvHue;
+    Serial.println("Changed gHsvHue to:");
+    Serial.println(gHsvHue);
+  }
+}
+
+void gBulbHsvHueRandomSync() {
+  uint8_t offset = map(analogRead(ANALOG_PIN), 0, 1023, 0, 255); // 10 Bits ADC (Int [0 to 1023])
+
+  if (gOffset != offset && abs(gOffset - offset) > 4) {
+    // Init random Bulb hue
+    for (int i = 0; i < NUM_BULBS; i += 1) {
+      gBulbHsvHue[i] = random8();
+
+      //  Serial.println("Bulb #");
+      //  Serial.println(i);
+      //  Serial.println(gBulbHsvHue[i]);
     }
+    gOffset = offset;
+
+    Serial.println("Changed all Bulbs HSV Hue. Update gOffset to:");
+    Serial.println(gOffset);
+  }
+
+}
+
+
+void gCycleSpeedSync() {
+  uint8_t cycleSpeed = map(analogRead(ANALOG_PIN), 0, 1023, MIN_CYCLE_SPEED, MAX_CYCLE_SPEED); // 10 Bits ADC (Int [0 to 1023])
+
+  // Magic [-2, 2] interval, is the deadband to trigger change detection
+  if (gCycleSpeed != cycleSpeed && abs(gCycleSpeed - cycleSpeed) > 2) {
+    gCycleSpeed = cycleSpeed;
+    Serial.println("Changed gCycleSpeed to:");
+    Serial.println(gCycleSpeed);
   }
 }
 
-void solidOneMixBrightness() {
-  fill_solid(leds, NUM_LEDS, CHSV(gBulbsHue[0], 255, gOffset));
+void gCycleHsvHue() {
+  static uint32_t previous = millis();
+
+  if (millis() - previous > gCycleSpeed) {
+    previous = millis();
+    gHsvHue += 1;
+  }
 }
 
-void solidThreeMixHue() {
+void solidOneMixHsvHue() {
+  gHsvHueSync();
+  fill_solid(leds, NUM_LEDS, CHSV(gHsvHue, 255, 255));
+}
+
+void solidOneMixHsvValue() {
+  gHsvValueSync();
+  fill_solid(leds, NUM_LEDS, CHSV(gHsvHue, 255, gHsvValue));
+}
+
+void solidThreeRandomHsvHue() {
+  gBulbHsvHueRandomSync();
   for (int i = 0; i < NUM_BULBS; i += 1) {
-    solidBulb(i, gBulbsHue[i] + gOffset);
+    solidBulb(i, gBulbHsvHue[i]);
   }
 }
 
-void solidThreeMixBrightnessTransitionSpeed() {
+void solidThreeMixHsvHue() {
+  gOffsetSync();
+  for (int i = 0; i < NUM_BULBS; i += 1) {
+    solidBulb(i, gBulbHsvHue[i] + gOffset);
+  }
+}
+
+void solidThreeMixHsvValueTransitionSpeed() {
   fill_solid(leds, NUM_LEDS, CRGB::Red);
 }
 
-void solidThreeMixHueTransitionSpeed() {
+void solidThreeMixHsvHueTransitionSpeed() {
   fill_solid(leds, NUM_LEDS, CRGB::Green);
 }
 
 void rainbowMixSpeed() {
-  fill_rainbow(leds, NUM_LEDS, gHue, 7);;
+  gCycleSpeedSync();
+  gCycleHsvHue();
+  fill_rainbow(leds, NUM_LEDS, gHsvHue, 12);;
 }
 
 void solidWhite() {
@@ -210,21 +289,28 @@ void solidWhite() {
 
 void updateGpattern() {
   switch (gPatternIdx) {
-    case   SOLID_ONE_MIX_HUE:
-      gPattern = solidOneMixHue;
+    case   SOLID_ONE_MIX_HSV_HUE:
+      gPattern = solidOneMixHsvHue;
       break;
-    case SOLID_ONE_MIX_BRIGHTNESS:
-      gPattern = solidOneMixBrightness;
+/*
+    case SOLID_ONE_MIX_HSV_VALUE:
+      gPattern = solidOneMixHsvValue;
       break;
-    case SOLID_THREE_MIX_HUE:
-      gPattern = solidThreeMixHue;
+      */
+    case SOLID_THREE_RANDOM_HSV_HUE:
+      gPattern = solidThreeRandomHsvHue;
       break;
-    case SOLID_THREE_MIX_BRIGHTNESS_TRANSITION_SPEED:
-      gPattern = solidThreeMixBrightnessTransitionSpeed;
+    case SOLID_THREE_MIX_HSV_HUE:
+      gPattern = solidThreeMixHsvHue;
       break;
-    case SOLID_THREE_MIX_HUE_TRANSITION_SPEED:
-      gPattern = solidThreeMixHueTransitionSpeed;
+    /*
+      case SOLID_THREE_MIX_HSV_VALUE_TRANSITION_SPEED:
+      gPattern = solidThreeMixHsvValueTransitionSpeed;
       break;
+      case SOLID_THREE_MIX_HSV_HUE_TRANSITION_SPEED:
+      gPattern = solidThreeMixHsvHueTransitionSpeed;
+      break;
+    */
     case RAINBOW_MIX_SPEED:
       gPattern = rainbowMixSpeed;
       break;
